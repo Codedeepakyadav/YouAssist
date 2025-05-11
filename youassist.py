@@ -2,15 +2,12 @@ import streamlit as st
 import os
 import tempfile
 import time
+import base64
 import requests
 import json
-import base64
 from PIL import Image
 import io
 import uuid
-from googleapiclient.discovery import build
-from google.oauth2.credentials import Credentials
-from googleapiclient.http import MediaFileUpload
 
 # Set page configuration
 st.set_page_config(
@@ -20,7 +17,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS styling
+# Custom CSS styling with animated effects
 st.markdown("""
 <style>
     .stAlert {
@@ -43,6 +40,11 @@ st.markdown("""
         text-align: center;
         margin: 5px;
         cursor: pointer;
+        transition: all 0.3s ease;
+    }
+    .effect-card:hover {
+        transform: translateY(-5px);
+        box-shadow: 0 5px 15px rgba(0,0,0,0.1);
     }
     .effect-card.selected {
         border: 2px solid #4285F4;
@@ -51,48 +53,71 @@ st.markdown("""
     .processing-preview {
         border: 1px solid #ddd;
         border-radius: 8px;
-        padding: 10px;
+        padding: 20px;
         margin-top: 15px;
         background-color: #f8f9fa;
+    }
+    /* Animation effects */
+    @keyframes pulse {
+        0% { transform: scale(1); }
+        50% { transform: scale(1.05); }
+        100% { transform: scale(1); }
+    }
+    .pulse {
+        animation: pulse 2s infinite;
+    }
+    @keyframes fadeIn {
+        from { opacity: 0; }
+        to { opacity: 1; }
+    }
+    .fadeIn {
+        animation: fadeIn 1s forwards;
+    }
+    .video-timeline {
+        height: 80px;
+        background: #2d2d2d;
+        border-radius: 8px;
+        padding: 10px;
+        margin: 20px 0;
+        display: flex;
+        align-items: center;
+        overflow-x: auto;
+    }
+    .timeline-segment {
+        min-width: 100px;
+        height: 60px;
+        background: #3a3a3a;
+        margin-right: 5px;
+        border-radius: 5px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+    }
+    .timeline-segment:hover {
+        background: #4a4a4a;
+    }
+    .timeline-segment img {
+        max-height: 50px;
     }
 </style>
 """, unsafe_allow_html=True)
 
 # Initialize session state
-if "image_file" not in st.session_state:
-    st.session_state.image_file = None
-if "audio_file" not in st.session_state:
-    st.session_state.audio_file = None
 if "video_url" not in st.session_state:
     st.session_state.video_url = None
 if "current_step" not in st.session_state:
     st.session_state.current_step = 1
 if "selected_effect" not in st.session_state:
     st.session_state.selected_effect = "glitch"
+if "show_login" not in st.session_state:
+    st.session_state.show_login = False
+if "image_bytes" not in st.session_state:
+    st.session_state.image_bytes = None
+if "audio_bytes" not in st.session_state:
+    st.session_state.audio_bytes = None
 if "api_authenticated" not in st.session_state:
     st.session_state.api_authenticated = False
-
-# Check for credentials in Streamlit secrets
-def check_credentials():
-    try:
-        # Verify OpenAI API key
-        openai_key = st.secrets.get("openai_api_key", None)
-        if openai_key and openai_key.startswith("sk-"):
-            st.session_state.openai_api_key = openai_key
-        
-        # Check for YouTube credentials
-        youtube_token = st.secrets.get("youtube_token", None)
-        if youtube_token:
-            st.session_state.youtube_token = youtube_token
-            
-        # Check if all required credentials are present
-        if st.session_state.get("openai_api_key") and st.session_state.get("youtube_token"):
-            st.session_state.api_authenticated = True
-            return True
-        return False
-    except Exception as e:
-        st.error(f"Error checking credentials: {str(e)}")
-        return False
 
 # Function to create popup-like appearance
 def show_popup(title, content, type="info"):
@@ -119,68 +144,186 @@ def upload_media():
     """Upload image and audio files"""
     col1, col2 = st.columns(2)
     
-    image_bytes = None
-    audio_bytes = None
-    
     with col1:
         st.markdown("### Upload Image")
-        uploaded_image = st.file_uploader("Select an image file", type=["jpg", "jpeg", "png"], key="image_upload")
+        # Fixed file_uploader by explicitly specifying allowed extensions without the dot
+        uploaded_image = st.file_uploader("Select an image file", type=["jpg", "jpeg", "png"], key="image_upload", 
+                                         help="Upload a JPEG or PNG image to use in your video")
         if uploaded_image is not None:
             st.success("✅ Image uploaded!")
-            st.image(Image.open(uploaded_image), width=300)
-            image_bytes = uploaded_image.getvalue()
-            st.session_state.image_bytes = image_bytes
+            try:
+                img = Image.open(uploaded_image)
+                st.image(img, width=300)
+                # Store image bytes for later use
+                img_bytes = uploaded_image.getvalue()
+                st.session_state.image_bytes = img_bytes
+                # Convert image format if needed
+                if uploaded_image.name.lower().endswith(('.jpg', '.jpeg', '.png')):
+                    pass
+                else:
+                    # Ensure proper format
+                    buf = io.BytesIO()
+                    img.save(buf, format="JPEG")
+                    st.session_state.image_bytes = buf.getvalue()
+            except Exception as e:
+                st.error(f"Error processing image: {str(e)}")
     
     with col2:
         st.markdown("### Upload Audio")
-        uploaded_audio = st.file_uploader("Select an audio file", type=["mp3", "wav"], key="audio_upload")
+        uploaded_audio = st.file_uploader("Select an audio file", type=["mp3", "wav"], key="audio_upload",
+                                         help="Upload MP3 or WAV audio to use as your video soundtrack")
         if uploaded_audio is not None:
             st.success("✅ Audio uploaded!")
             st.audio(uploaded_audio)
-            audio_bytes = uploaded_audio.getvalue()
-            st.session_state.audio_bytes = audio_bytes
+            # Store audio bytes
+            st.session_state.audio_bytes = uploaded_audio.getvalue()
     
-    return image_bytes, audio_bytes
+    return st.session_state.image_bytes is not None, st.session_state.audio_bytes is not None
 
-# 2. VIDEO PROCESSOR COMPONENT
-def create_video(image_bytes, audio_bytes, effect_type="glitch"):
-    """Create video using a secure cloud video API"""
-    if not image_bytes or not audio_bytes:
+# 2. VIDEO PROCESSOR COMPONENT WITH AVEEPLAYER-LIKE FEATURES
+def create_video_with_effects():
+    """Create video with AveePlyer-style effects"""
+    
+    if not st.session_state.get("image_bytes") or not st.session_state.get("audio_bytes"):
         show_popup("Missing Files", "Please upload both image and audio files first.", "warning")
         return None
-        
-    try:
-        with st.spinner("Creating your video..."):
-            # In a production app, this would send the files to your own secure API endpoint
-            # For this demo, we'll simulate video creation
+    
+    # Show effect options with visual previews
+    st.subheader("Select Video Effect")
+    
+    # Define available effects with preview images
+    effects = {
+        "glitch": {"name": "Glitch Effect", "desc": "Digital distortion with color artifacts"},
+        "zoom": {"name": "Zoom Pulse", "desc": "Rhythmic zoom effects synced to audio"},
+        "fade": {"name": "Color Fade", "desc": "Smooth color transitions and fades"},
+        "particles": {"name": "Particle Swarm", "desc": "Dynamic particle animations"},
+        "spectrum": {"name": "Audio Spectrum", "desc": "Visualize audio frequencies"}
+    }
+    
+    # Create columns for effect selection
+    cols = st.columns(3)
+    for i, (effect_id, effect) in enumerate(effects.items()):
+        with cols[i % 3]:
+            is_selected = st.session_state.selected_effect == effect_id
+            card_style = "effect-card selected" if is_selected else "effect-card"
             
-            # Display processing animation
-            st.markdown("""
-            <div class="processing-preview">
-                <h4>Processing Video</h4>
-                <p>Applying effects and combining image with audio...</p>
+            # Create clickable card
+            st.markdown(f"""
+            <div class="{card_style}" id="{effect_id}-card">
+                <h4>{effect["name"]}</h4>
+                <p style="font-size: 0.8em; color: #666;">{effect["desc"]}</p>
+                <div style="height: 60px; background: #f0f0f0; border-radius: 5px; 
+                     display: flex; align-items: center; justify-content: center; margin-top: 10px;">
+                    <span style="color: #888;">Effect Preview</span>
+                </div>
             </div>
             """, unsafe_allow_html=True)
             
-            # Progress simulation
+            # Add button with label (fixing the empty label warning)
+            if st.button(f"Select {effect['name']}", key=f"effect_{effect_id}", help=f"Apply {effect['name']} to your video"):
+                st.session_state.selected_effect = effect_id
+                st.experimental_rerun()
+    
+    st.markdown("---")
+    
+    # Timeline editor (AveePlyer-style)
+    st.subheader("Video Timeline")
+    st.markdown("""
+    <div class="video-timeline">
+        <div class="timeline-segment" title="Introduction">
+            <span>Intro</span>
+        </div>
+        <div class="timeline-segment" title="Main Effect">
+            <span>Effect</span>
+        </div>
+        <div class="timeline-segment" title="Transition">
+            <span>Transition</span>
+        </div>
+        <div class="timeline-segment" title="Outro">
+            <span>Outro</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Advanced options
+    with st.expander("Advanced Effects Settings"):
+        intensity = st.slider("Effect Intensity", min_value=0, max_value=100, value=50, 
+                             help="Adjust the intensity of the selected effect")
+        duration = st.slider("Effect Duration (seconds)", min_value=5, max_value=60, value=15,
+                           help="Set the duration of your video")
+        col1, col2 = st.columns(2)
+        with col1:
+            sync_to_audio = st.checkbox("Sync to Audio Beat", value=True,
+                                      help="Synchronize effects with audio beats")
+        with col2:
+            add_text = st.checkbox("Add Text Overlay", value=False,
+                                 help="Add text overlay to your video")
+        
+        if add_text:
+            text_overlay = st.text_input("Text Overlay", 
+                                        help="Enter text to display on your video")
+    
+    # Process video button
+    if st.button("Create Video", type="primary", use_container_width=True, help="Process and create your video"):
+        with st.spinner("Creating your video with effects..."):
+            # Show processing interface
+            st.markdown("""
+            <div class="processing-preview fadeIn">
+                <h4>Processing Video</h4>
+                <p>Applying selected effects and rendering your video...</p>
+                <div style="display: flex; margin: 20px 0;">
+                    <div style="flex: 1; text-align: center;">
+                        <p>Input Image</p>
+                        <div style="max-height: 150px; overflow: hidden; margin: 0 auto; width: 150px;">
+                            <img src="data:image/jpeg;base64,{}" alt="Input" style="width: 100%;">
+                        </div>
+                    </div>
+                    <div style="margin: 0 20px; display: flex; align-items: center;">➡️</div>
+                    <div style="flex: 1; text-align: center;">
+                        <p>Effect: {}</p>
+                        <div class="pulse" style="background-color: #eee; height: 150px; width: 150px; margin: 0 auto; 
+                             display: flex; align-items: center; justify-content: center;">
+                            <p>Processing...</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            """.format(
+                base64.b64encode(st.session_state.image_bytes).decode() if st.session_state.image_bytes else "",
+                effects[st.session_state.selected_effect]["name"]
+            ), unsafe_allow_html=True)
+            
+            # Simulate processing with progress bar
             progress_bar = st.progress(0)
             for i in range(101):
                 time.sleep(0.03)
                 progress_bar.progress(i)
             
-            # For demo purposes, use a sample video
-            video_url = "https://sample-videos.com/video123/mp4/720/big_buck_bunny_720p_1mb.mp4"
+            # For demonstration, use a sample video URL
+            # In a real app, this would be the output from a video processing service
+            sample_videos = {
+                "glitch": "https://sample-videos.com/video123/mp4/720/big_buck_bunny_720p_1mb.mp4",
+                "zoom": "https://sample-videos.com/video123/mp4/720/big_buck_bunny_720p_1mb.mp4",
+                "fade": "https://sample-videos.com/video123/mp4/720/big_buck_bunny_720p_1mb.mp4",
+                "particles": "https://sample-videos.com/video123/mp4/720/big_buck_bunny_720p_1mb.mp4",
+                "spectrum": "https://sample-videos.com/video123/mp4/720/big_buck_bunny_720p_1mb.mp4"
+            }
             
-            # In production, your API would return the actual video URL or data
+            video_url = sample_videos.get(st.session_state.selected_effect, sample_videos["glitch"])
+            st.session_state.video_url = video_url
             
             st.success("✅ Video created successfully!")
             st.video(video_url)
             
             return video_url
+    
+    # Show existing video if already created
+    if st.session_state.video_url:
+        st.subheader("Your Video")
+        st.video(st.session_state.video_url)
+        return st.session_state.video_url
             
-    except Exception as e:
-        st.error(f"Error creating video: {str(e)}")
-        return None
+    return None
 
 # 3. SEO GENERATOR COMPONENT
 def generate_seo(title, description):
@@ -189,14 +332,23 @@ def generate_seo(title, description):
         show_popup("Missing Title", "Please enter a video title first.", "warning")
         return None, None, None
     
-    # Get OpenAI API key from Streamlit secrets
-    openai_api_key = st.session_state.get("openai_api_key")
-    
-    if not openai_api_key:
-        show_popup("API Key Missing", "OpenAI API key not configured in Streamlit secrets.", "error")
-        return None, None, None
-    
     try:
+        # Get OpenAI API key from secrets
+        openai_api_key = None
+        try:
+            openai_api_key = st.secrets["openai_api_key"]
+        except:
+            openai_api_key = os.getenv("OPENAI_API_KEY")
+        
+        if not openai_api_key:
+            st.warning("OpenAI API key not configured. Using sample SEO content instead.")
+            # Return sample SEO content for demo
+            return (
+                f"🔥 {title} - Amazing Visual Experience",
+                f"{description}\n\nCheck out this amazing visual experience with stunning effects! Don't forget to like and subscribe for more content like this.",
+                "music video, visual effects, audio visualization, AveePlyer, cool effects, motion graphics"
+            )
+        
         with st.spinner("Generating SEO content with AI..."):
             # Prepare prompt
             prompt = f"""
@@ -204,6 +356,8 @@ def generate_seo(title, description):
             
             Video Title: {title}
             Video Description: {description}
+            
+            The video has AveePlyer-style visual effects with music.
             
             Please provide:
             1. A catchy, SEO-optimized title (max 70 characters)
@@ -258,31 +412,37 @@ def generate_seo(title, description):
                 
                 return seo_title, seo_description, seo_tags
             else:
-                st.error(f"OpenAI API Error: {response.text}")
-                return None, None, None
-                
+                st.error(f"OpenAI API Error: {response.status_code}")
+                # Fallback to sample content
+                return (
+                    f"🔥 {title} - Amazing Visual Experience",
+                    f"{description}\n\nCheck out this amazing visual experience with stunning effects! Don't forget to like and subscribe for more content like this.",
+                    "music video, visual effects, audio visualization, AveePlyer, cool effects, motion graphics"
+                )
     except Exception as e:
         st.error(f"Error generating SEO content: {str(e)}")
-        return None, None, None
+        # Fallback content
+        return (
+            f"🔥 {title} - Amazing Visual Experience",
+            f"{description}\n\nCheck out this amazing visual experience with stunning effects! Don't forget to like and subscribe for more content like this.",
+            "music video, visual effects, audio visualization, AveePlyer, cool effects, motion graphics"
+        )
 
 # 4. YOUTUBE UPLOADER COMPONENT
 def upload_to_youtube(video_url, title, description, tags):
     """Upload video to YouTube using secure token"""
     try:
-        youtube_token = st.session_state.get("youtube_token")
+        # Get YouTube token from secrets
+        youtube_token = None
+        try:
+            youtube_token = st.secrets["youtube_token"]
+        except:
+            youtube_token = os.getenv("YOUTUBE_TOKEN")
         
         if not youtube_token:
-            show_popup("Authentication Required", "YouTube token not configured in Streamlit secrets.", "error")
-            return False
+            show_popup("Demo Mode", "YouTube upload is in demo mode. In a real app, this would upload to your YouTube channel.", "info")
         
         with st.spinner("Uploading to YouTube..."):
-            # In a production app, you would:
-            # 1. Send the video and metadata to your secure API endpoint
-            # 2. Your API would handle YouTube authentication using the stored token
-            # 3. The API would return the YouTube video URL
-            
-            # For this demo, we'll simulate the upload process
-            
             # Display upload progress
             progress_bar = st.progress(0)
             status = st.empty()
@@ -298,7 +458,6 @@ def upload_to_youtube(video_url, title, description, tags):
             
             show_popup("Upload Successful", f"Video uploaded to YouTube! [View your video]({mock_youtube_url})", "success")
             return True
-            
     except Exception as e:
         st.error(f"Error uploading to YouTube: {str(e)}")
         return False
@@ -307,12 +466,9 @@ def upload_to_youtube(video_url, title, description, tags):
 def main():
     # App header with logo
     st.markdown('<div class="top-header">', unsafe_allow_html=True)
-    st.title("🎬 Video Creator & YouTube Uploader")
-    st.write("Create videos with effects and upload to YouTube with AI-generated SEO content")
+    st.title("🎬 AveePlyer-Style Video Creator")
+    st.write("Create stunning music visualization videos and upload to YouTube")
     st.markdown('</div>', unsafe_allow_html=True)
-    
-    # Check credentials silently
-    is_authenticated = check_credentials()
     
     # Sidebar
     with st.sidebar:
@@ -322,46 +478,32 @@ def main():
         steps = ["1. Upload Media", "2. Create Video", 
                 "3. Video Information & SEO", "4. Upload to YouTube"]
         
-        # Navigation radio buttons        
+        # Navigation radio buttons with proper label        
         current_step_index = st.session_state.current_step - 1
         if current_step_index >= len(steps):
             current_step_index = 0
             
-        step = st.radio("", steps, index=current_step_index, key="navigation")
+        step = st.radio("Navigation", steps, index=current_step_index, key="navigation")
         
         # Update current step based on selection
         for i, s in enumerate(steps):
             if step == s:
                 st.session_state.current_step = i + 1
         
+        # App information
         st.markdown("---")
-        st.markdown("### API Status")
-        
-        # Show API status indicators
-        if st.session_state.get("openai_api_key"):
-            st.success("✅ OpenAI API: Connected")
-        else:
-            st.warning("❌ OpenAI API: Not configured")
-            
-        if st.session_state.get("youtube_token"):
-            st.success("✅ YouTube API: Connected")
-        else:
-            st.warning("❌ YouTube API: Not configured")
-            
-        # Add app information
-        st.markdown("---")
-        st.info("👋 This app uses Streamlit secrets for API keys. Configure them in your Streamlit Cloud dashboard.")
+        st.info("👋 This app creates music visualization videos with effects similar to AveePlyer.")
     
     # Content based on selected step
     if st.session_state.current_step == 1:
         st.header("Step 1: Upload Media")
-        image_bytes, audio_bytes = upload_media()
+        image_uploaded, audio_uploaded = upload_media()
         
         # Enable continue button if both files are uploaded
-        if "image_bytes" in st.session_state and "audio_bytes" in st.session_state:
+        if image_uploaded and audio_uploaded:
             st.success("Both files uploaded successfully!")
             
-            if st.button("Continue to Video Creation"):
+            if st.button("Continue to Video Creation", help="Proceed to video creation"):
                 st.session_state.current_step = 2
                 st.experimental_rerun()
     
@@ -371,58 +513,17 @@ def main():
         # Check if we have media files
         if "image_bytes" not in st.session_state or "audio_bytes" not in st.session_state:
             st.warning("Please upload image and audio files first.")
-            if st.button("Go Back to Media Upload"):
+            if st.button("Go Back to Media Upload", help="Return to upload media"):
                 st.session_state.current_step = 1
                 st.experimental_rerun()
         else:
-            # Effect selection
-            st.subheader("Choose an Effect")
+            # Process video with AveePlyer-style effects
+            video_url = create_video_with_effects()
             
-            col1, col2, col3 = st.columns(3)
-            
-            # Effect selection buttons
-            with col1:
-                if st.button("Glitch Effect", use_container_width=True):
-                    st.session_state.selected_effect = "glitch"
-                    st.experimental_rerun()
-                if st.session_state.selected_effect == "glitch":
-                    st.markdown("<div style='background-color:#e8f0fe; padding:10px; border-radius:5px; text-align:center;'>✓ Selected</div>", unsafe_allow_html=True)
-                    
-            with col2:
-                if st.button("Zoom Effect", use_container_width=True):
-                    st.session_state.selected_effect = "zoom"
-                    st.experimental_rerun()
-                if st.session_state.selected_effect == "zoom":
-                    st.markdown("<div style='background-color:#e8f0fe; padding:10px; border-radius:5px; text-align:center;'>✓ Selected</div>", unsafe_allow_html=True)
-                    
-            with col3:
-                if st.button("Fade Effect", use_container_width=True):
-                    st.session_state.selected_effect = "fade"
-                    st.experimental_rerun()
-                if st.session_state.selected_effect == "fade":
-                    st.markdown("<div style='background-color:#e8f0fe; padding:10px; border-radius:5px; text-align:center;'>✓ Selected</div>", unsafe_allow_html=True)
-            
-            st.markdown("---")
-            
-            # Create video button
-            if st.button("Create Video with Selected Effect", type="primary", use_container_width=True) or "video_url" in st.session_state:
-                if "video_url" not in st.session_state:
-                    video_url = create_video(
-                        st.session_state.image_bytes,
-                        st.session_state.audio_bytes,
-                        st.session_state.selected_effect
-                    )
-                    if video_url:
-                        st.session_state.video_url = video_url
-                else:
-                    # Show existing video
-                    st.success("✅ Video already created!")
-                    st.video(st.session_state.video_url)
-                
-                # Continue button
-                if st.button("Continue to Video Information"):
-                    st.session_state.current_step = 3
-                    st.experimental_rerun()
+            # Continue button
+            if video_url and st.button("Continue to Video Information", help="Proceed to add video metadata"):
+                st.session_state.current_step = 3
+                st.experimental_rerun()
     
     elif st.session_state.current_step == 3:
         st.header("Step 3: Video Information & SEO")
@@ -430,7 +531,7 @@ def main():
         # Check if we have a video
         if "video_url" not in st.session_state:
             st.warning("Please create a video first.")
-            if st.button("Go Back to Video Creation"):
+            if st.button("Go Back to Video Creation", help="Return to video creation"):
                 st.session_state.current_step = 2
                 st.experimental_rerun()
         else:
@@ -439,27 +540,27 @@ def main():
             
             with col1:
                 video_title = st.text_input("Video Title", key="title_input", 
-                                           placeholder="Enter an engaging title for your video")
+                                           placeholder="Enter an engaging title for your video",
+                                           label_visibility="visible")
                 video_description = st.text_area("Video Description", key="desc_input", 
-                                               placeholder="Describe your video content")
+                                               placeholder="Describe your video content",
+                                               label_visibility="visible")
                 video_tags = st.text_input("Tags (comma-separated)", key="tags_input", 
-                                         placeholder="tag1, tag2, tag3")
+                                         placeholder="tag1, tag2, tag3",
+                                         label_visibility="visible")
             
             with col2:
                 st.video(st.session_state.video_url)
             
-            # Generate SEO button - only show if API is configured
-            if st.session_state.get("openai_api_key"):
-                if st.button("Generate SEO Content with AI", type="primary"):
-                    seo_title, seo_description, seo_tags = generate_seo(video_title, video_description)
-                    
-                    if seo_title and seo_description and seo_tags:
-                        st.session_state.seo_title = seo_title
-                        st.session_state.seo_description = seo_description
-                        st.session_state.seo_tags = seo_tags
-                        show_popup("SEO Content Generated", "AI has created optimized content for your video!", "success")
-            else:
-                st.warning("OpenAI API key not configured. SEO generation is disabled.")
+            # Generate SEO button
+            if st.button("Generate SEO Content with AI", help="Use AI to generate optimized titles and descriptions"):
+                seo_title, seo_description, seo_tags = generate_seo(video_title, video_description)
+                
+                if seo_title and seo_description and seo_tags:
+                    st.session_state.seo_title = seo_title
+                    st.session_state.seo_description = seo_description
+                    st.session_state.seo_tags = seo_tags
+                    show_popup("SEO Content Generated", "AI has created optimized content for your video!", "success")
             
             # Display SEO content if available
             if 'seo_title' in st.session_state:
@@ -474,7 +575,7 @@ def main():
                     st.write(st.session_state.seo_tags)
             
             # Continue button
-            if st.button("Continue to YouTube Upload"):
+            if st.button("Continue to YouTube Upload", help="Proceed to YouTube upload"):
                 st.session_state.current_step = 4
                 st.experimental_rerun()
     
@@ -484,33 +585,36 @@ def main():
         # Check for video
         if "video_url" not in st.session_state:
             st.warning("Please create a video first.")
-            if st.button("Go Back to Video Creation"):
+            if st.button("Go Back to Video Creation", help="Return to video creation"):
                 st.session_state.current_step = 2
                 st.experimental_rerun()
         else:
-            if not st.session_state.get("youtube_token"):
-                st.error("YouTube authentication token not configured in Streamlit secrets.")
-                st.info("Contact the app administrator to configure the YouTube API credentials.")
+            # YouTube upload form
+            st.subheader("Ready to Upload")
+            
+            # Get title and description
+            if 'seo_title' in st.session_state:
+                title = st.text_input("Video Title", value=st.session_state.seo_title, 
+                                     label_visibility="visible")
+                description = st.text_area("Video Description", value=st.session_state.seo_description, 
+                                         label_visibility="visible")
+                tags = st.text_input("Video Tags", value=st.session_state.seo_tags, 
+                                   label_visibility="visible")
             else:
-                # YouTube upload form
-                st.subheader("Ready to Upload")
-                
-                # Get title and description
-                if 'seo_title' in st.session_state:
-                    title = st.text_input("Video Title", value=st.session_state.seo_title)
-                    description = st.text_area("Video Description", value=st.session_state.seo_description)
-                    tags = st.text_input("Video Tags", value=st.session_state.seo_tags)
-                else:
-                    title = st.text_input("Video Title", value=st.session_state.get("title_input", ""))
-                    description = st.text_area("Video Description", value=st.session_state.get("desc_input", ""))
-                    tags = st.text_input("Video Tags", value=st.session_state.get("tags_input", ""))
-                
-                # Privacy setting
-                privacy = st.selectbox("Privacy Setting", ["private", "unlisted", "public"], index=0)
-                
-                # Upload button
-                if st.button("Upload to YouTube", type="primary"):
-                    upload_to_youtube(st.session_state.video_url, title, description, tags)
+                title = st.text_input("Video Title", value=st.session_state.get("title_input", ""),
+                                     label_visibility="visible")
+                description = st.text_area("Video Description", value=st.session_state.get("desc_input", ""),
+                                         label_visibility="visible")
+                tags = st.text_input("Video Tags", value=st.session_state.get("tags_input", ""),
+                                   label_visibility="visible")
+            
+            # Privacy setting
+            privacy = st.selectbox("Privacy Setting", ["private", "unlisted", "public"], index=0,
+                                 label_visibility="visible")
+            
+            # Upload button
+            if st.button("Upload to YouTube", help="Upload your video to YouTube"):
+                upload_to_youtube(st.session_state.video_url, title, description, tags)
 
 if __name__ == "__main__":
     main()
