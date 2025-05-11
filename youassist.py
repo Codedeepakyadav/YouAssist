@@ -8,14 +8,21 @@ import base64
 from PIL import Image
 import requests
 import json
-import google_auth_oauthlib.flow
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
-from dotenv import load_dotenv
+try:
+    import google_auth_oauthlib.flow
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaFileUpload
+    GOOGLE_IMPORTS_SUCCESS = True
+except ImportError:
+    GOOGLE_IMPORTS_SUCCESS = False
+    st.error("Google API libraries not available. YouTube upload functionality will be disabled.")
 
-# Load environment variables for API keys
-load_dotenv()
+try:
+    from dotenv import load_dotenv
+    load_dotenv()  # Load environment variables for API keys
+except ImportError:
+    pass  # Skip if dotenv is not available
 
 # Set page configuration
 st.set_page_config(
@@ -103,6 +110,14 @@ def show_popup(title, content, type="info"):
         </div>
         """, unsafe_allow_html=True)
 
+# Detect if FFmpeg is available
+def is_ffmpeg_available():
+    try:
+        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True)
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return False
+
 # 1. MEDIA UPLOADER COMPONENT
 def upload_media():
     """Upload image and audio files"""
@@ -145,6 +160,15 @@ def process_video(image_path, audio_path):
         show_popup("Missing Files", "Please upload both image and audio files first.", "warning")
         return None
     
+    # Check if FFmpeg is available
+    if not is_ffmpeg_available():
+        show_popup(
+            "FFmpeg Not Available", 
+            "This cloud environment doesn't have FFmpeg installed. The video creation feature is only available when running locally.", 
+            "warning"
+        )
+        return None
+    
     try:
         with st.spinner("Creating your video with glitch effects..."):
             # Create output path
@@ -167,13 +191,6 @@ def process_video(image_path, audio_path):
                 output_path
             ]
             
-            # Check if FFmpeg is installed
-            try:
-                subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True)
-            except FileNotFoundError:
-                show_popup("FFmpeg Not Found", "Please install FFmpeg to create videos: https://ffmpeg.org/download.html", "error")
-                return None
-                
             # Run ffmpeg command
             process = subprocess.run(cmd, capture_output=True, text=True)
             
@@ -197,8 +214,18 @@ def generate_seo_content(title, description):
         show_popup("Missing Title", "Please enter a video title first.", "warning")
         return None, None, None
     
-    # Get OpenAI API key
-    openai_api_key = st.session_state.get("openai_api_key") or os.getenv("OPENAI_API_KEY")
+    # Get OpenAI API key from Streamlit secrets or session state
+    openai_api_key = None
+    
+    # Try to get from Streamlit secrets first (for cloud deployment)
+    try:
+        openai_api_key = st.secrets["openai_api_key"]
+    except:
+        pass
+        
+    # If not in secrets, try session state or environment variable
+    if not openai_api_key:
+        openai_api_key = st.session_state.get("openai_api_key") or os.getenv("OPENAI_API_KEY")
     
     if not openai_api_key:
         with st.expander("Set OpenAI API Key", expanded=True):
@@ -291,15 +318,27 @@ def generate_seo_content(title, description):
 # 4. YOUTUBE UPLOADER COMPONENT
 def authenticate_youtube():
     """Enhanced YouTube OAuth authentication with modal-style popup"""
-    credentials_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'credentials')
-    os.makedirs(credentials_dir, exist_ok=True)
-    credentials_path = os.path.join(credentials_dir, 'youtube_credentials.pickle')
+    if not GOOGLE_IMPORTS_SUCCESS:
+        show_popup("Import Error", "Google API libraries not available. YouTube upload functionality is disabled.", "error")
+        return None
+        
+    # Create a safer credentials directory path
+    try:
+        credentials_dir = os.path.join(tempfile.gettempdir(), 'streamlit_youtube_auth')
+        os.makedirs(credentials_dir, exist_ok=True)
+        credentials_path = os.path.join(credentials_dir, 'youtube_credentials.pickle')
+    except:
+        # Fallback if we can't create directory
+        credentials_path = os.path.join(tempfile.gettempdir(), 'youtube_credentials.pickle')
     
     # If already authenticated, just return credentials
     if st.session_state.authenticated_youtube:
-        with open(credentials_path, 'rb') as token:
-            credentials = pickle.load(token)
-        return credentials
+        try:
+            with open(credentials_path, 'rb') as token:
+                credentials = pickle.load(token)
+            return credentials
+        except:
+            st.session_state.authenticated_youtube = False
     
     # Check for existing credentials
     if os.path.exists(credentials_path):
@@ -355,59 +394,66 @@ def authenticate_youtube():
             st.experimental_rerun()
         
         if client_secret_file:
-            # Save client secret file
+            # Save client secret file to temp
             client_secret_path = os.path.join(credentials_dir, 'client_secret.json')
             with open(client_secret_path, 'wb') as f:
                 f.write(client_secret_file.getbuffer())
             
-            # Create OAuth flow with improved UX
-            flow = google_auth_oauthlib.flow.Flow.from_client_secrets_file(
-                client_secret_path,
-                scopes=['https://www.googleapis.com/auth/youtube.upload']
-            )
-            
-            flow.redirect_uri = 'urn:ietf:wg:oauth:2.0:oob'
-            auth_url, _ = flow.authorization_url(access_type='offline', include_granted_scopes='true')
-            
-            # Display nicer auth link with automatic window opening
-            st.markdown(f"""
-            <div style="text-align: center; margin: 20px 0;">
-                <a href="{auth_url}" target="_blank" style="background-color: #4285F4; color: white; 
-                   padding: 10px 15px; border-radius: 5px; text-decoration: none; font-weight: bold;">
-                   Open Google Sign In
-                </a>
-                <p style="margin-top: 10px; font-size: 12px; color: #666;">
-                    (A new window will open for secure authentication)
-                </p>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            # Auto-focus on the code input field
-            auth_code = st.text_input("Enter the authorization code:", key="popup_auth_code")
-            
-            if auth_code:
-                try:
-                    # Exchange auth code for credentials
-                    flow.fetch_token(code=auth_code)
-                    credentials = flow.credentials
-                    
-                    # Save credentials securely
-                    with open(credentials_path, 'wb') as token:
-                        pickle.dump(credentials, token)
-                    
-                    st.session_state.authenticated_youtube = True
-                    st.session_state.show_login = False
-                    st.success("✅ Successfully signed in to YouTube!")
-                    time.sleep(1)  # Brief pause to show success message
-                    st.experimental_rerun()
-                    return credentials
-                except Exception as e:
-                    st.error(f"Authentication error: {str(e)}")
+            try:
+                # Create OAuth flow with improved UX
+                flow = google_auth_oauthlib.flow.Flow.from_client_secrets_file(
+                    client_secret_path,
+                    scopes=['https://www.googleapis.com/auth/youtube.upload']
+                )
+                
+                flow.redirect_uri = 'urn:ietf:wg:oauth:2.0:oob'
+                auth_url, _ = flow.authorization_url(access_type='offline', include_granted_scopes='true')
+                
+                # Display nicer auth link with automatic window opening
+                st.markdown(f"""
+                <div style="text-align: center; margin: 20px 0;">
+                    <a href="{auth_url}" target="_blank" style="background-color: #4285F4; color: white; 
+                       padding: 10px 15px; border-radius: 5px; text-decoration: none; font-weight: bold;">
+                       Open Google Sign In
+                    </a>
+                    <p style="margin-top: 10px; font-size: 12px; color: #666;">
+                        (A new window will open for secure authentication)
+                    </p>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Auto-focus on the code input field
+                auth_code = st.text_input("Enter the authorization code:", key="popup_auth_code")
+                
+                if auth_code:
+                    try:
+                        # Exchange auth code for credentials
+                        flow.fetch_token(code=auth_code)
+                        credentials = flow.credentials
+                        
+                        # Save credentials securely
+                        with open(credentials_path, 'wb') as token:
+                            pickle.dump(credentials, token)
+                        
+                        st.session_state.authenticated_youtube = True
+                        st.session_state.show_login = False
+                        st.success("✅ Successfully signed in to YouTube!")
+                        time.sleep(1)  # Brief pause to show success message
+                        st.experimental_rerun()
+                        return credentials
+                    except Exception as e:
+                        st.error(f"Authentication error: {str(e)}")
+            except Exception as e:
+                st.error(f"Error setting up authentication: {str(e)}")
     
     return None
 
 def upload_to_youtube(video_file, title, description, tags):
     """Upload video to YouTube with OAuth authentication"""
+    if not GOOGLE_IMPORTS_SUCCESS:
+        show_popup("Import Error", "Google API libraries not available. YouTube upload functionality is disabled.", "error")
+        return False
+        
     # First authenticate
     credentials = authenticate_youtube()
     
@@ -446,19 +492,21 @@ def upload_to_youtube(video_file, title, description, tags):
                     media_body=media
                 )
                 
-                response = None
                 progress_bar = st.progress(0)
-                with st.empty():
-                    status = st.empty()
-                    for i in range(1, 101):
-                        status.text(f"Uploading: {i}%")
-                        progress_bar.progress(i)
-                        if i == 100:
-                            response = request.execute()
+                status = st.empty()
+                
+                # Mock progress since we can't get real-time progress from the API easily
+                for i in range(1, 101):
+                    status.text(f"Uploading: {i}%")
+                    progress_bar.progress(i)
+                    if i < 100:
                         time.sleep(0.1)
                 
+                # Actual upload (in real app, you'd integrate this with the progress)
+                response = request.execute()
+                
                 # Get video details
-                video_id = response['id']
+                video_id = response.get('id', 'unknown')
                 video_url = f"https://www.youtube.com/watch?v={video_id}"
                 
                 # Show success popup
@@ -506,6 +554,13 @@ def main():
             st.success("✅ OpenAI: Connected")
         else:
             st.warning("❌ OpenAI: Not connected")
+        
+        # Show FFmpeg status
+        if is_ffmpeg_available():
+            st.success("✅ FFmpeg: Available")
+        else:
+            st.warning("❌ FFmpeg: Not available")
+            st.info("Video creation requires FFmpeg to be installed.")
     
     # Content based on selected step
     if st.session_state.current_step == 1:
@@ -532,15 +587,32 @@ def main():
                 st.experimental_rerun()
         else:
             # Process video
-            if st.button("Create Video with Glitch Effect") or st.session_state.get('processing_done', False):
-                video_file = process_video(st.session_state.image_file, st.session_state.audio_file)
-                if video_file:
-                    st.session_state.video_file = video_file
+            if not is_ffmpeg_available():
+                st.error("FFmpeg is not available in this environment. Video creation feature requires FFmpeg to be installed.")
+                st.info("If you're running on Streamlit Cloud, this feature is not supported.")
+                
+                # Mock video for testing in cloud environment
+                if st.button("Create Sample Video (Demo Mode)"):
+                    st.success("In demo mode, we'll skip actual video creation.")
+                    sample_video = "https://sample-videos.com/video123/mp4/720/big_buck_bunny_720p_1mb.mp4"
+                    st.video(sample_video)
+                    st.session_state.video_file = "sample_video.mp4"  # Just a placeholder
+                    st.session_state.processing_done = True
                     
-                    # Auto advance to next step
                     if st.button("Continue to Video Information"):
                         st.session_state.current_step = 3
                         st.experimental_rerun()
+            else:
+                # Regular processing with FFmpeg
+                if st.button("Create Video with Glitch Effect") or st.session_state.get('processing_done', False):
+                    video_file = process_video(st.session_state.image_file, st.session_state.audio_file)
+                    if video_file:
+                        st.session_state.video_file = video_file
+                        
+                        # Auto advance to next step
+                        if st.button("Continue to Video Information"):
+                            st.session_state.current_step = 3
+                            st.experimental_rerun()
     
     elif st.session_state.current_step == 3:
         st.header("Step 3: Video Information & SEO")
@@ -561,7 +633,10 @@ def main():
                 video_tags = st.text_input("Tags (comma-separated)", key="tags_input")
             
             with col2:
-                st.video(st.session_state.video_file)
+                if st.session_state.video_file == "sample_video.mp4":  # Demo mode
+                    st.video("https://sample-videos.com/video123/mp4/720/big_buck_bunny_720p_1mb.mp4")
+                else:
+                    st.video(st.session_state.video_file)
             
             # Generate SEO content
             if st.button("Generate SEO Content with AI"):
@@ -593,6 +668,12 @@ def main():
     elif st.session_state.current_step == 4:
         st.header("Step 4: Upload to YouTube")
         
+        if not GOOGLE_IMPORTS_SUCCESS:
+            st.error("YouTube upload functionality is not available because the required Google libraries couldn't be imported.")
+            st.info("Make sure you have the following packages installed:")
+            st.code("google-api-python-client google-auth-oauthlib googleapiclient")
+            return
+            
         # Check for video file
         if not st.session_state.get('video_file'):
             st.warning("Please create a video first.")
@@ -620,10 +701,16 @@ def main():
                 # Privacy setting
                 privacy = st.selectbox("Privacy Setting", ["private", "unlisted", "public"], index=0)
                 
-                # Upload button
-                if st.button("Upload to YouTube"):
-                    # Upload video
-                    upload_to_youtube(st.session_state.video_file, title, description, tags)
+                # Handle demo mode
+                if st.session_state.video_file == "sample_video.mp4":  # Demo mode
+                    if st.button("Upload to YouTube"):
+                        st.warning("This is demo mode. In a real environment, your video would be uploaded to YouTube now.")
+                        show_popup("Demo Mode", "This is just a simulation. In a real environment with proper setup, your video would be uploaded to YouTube.", "info")
+                else:
+                    # Upload button for real mode
+                    if st.button("Upload to YouTube"):
+                        # Upload video
+                        upload_to_youtube(st.session_state.video_file, title, description, tags)
 
 if __name__ == "__main__":
     main()
