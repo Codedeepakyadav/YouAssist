@@ -8,6 +8,9 @@ import base64
 from PIL import Image
 import requests
 import json
+import sys
+
+# Handle Google API imports with error checking
 try:
     import google_auth_oauthlib.flow
     from google.oauth2.credentials import Credentials
@@ -16,8 +19,8 @@ try:
     GOOGLE_IMPORTS_SUCCESS = True
 except ImportError:
     GOOGLE_IMPORTS_SUCCESS = False
-    st.error("Google API libraries not available. YouTube upload functionality will be disabled.")
 
+# Handle dotenv import
 try:
     from dotenv import load_dotenv
     load_dotenv()  # Load environment variables for API keys
@@ -88,6 +91,10 @@ if "processing_done" not in st.session_state:
     st.session_state.processing_done = False
 if "current_step" not in st.session_state:
     st.session_state.current_step = 1
+if "image_file" not in st.session_state:
+    st.session_state.image_file = None
+if "audio_file" not in st.session_state:
+    st.session_state.audio_file = None
 
 # Function to create popup-like appearance
 def show_popup(title, content, type="info"):
@@ -123,6 +130,9 @@ def upload_media():
     """Upload image and audio files"""
     col1, col2 = st.columns(2)
     
+    image_path = None
+    audio_path = None
+    
     with col1:
         st.markdown("### Upload Image")
         uploaded_image = st.file_uploader("Select an image file", type=["jpg", "jpeg", "png"])
@@ -134,8 +144,6 @@ def upload_media():
             image_path = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg').name
             with open(image_path, "wb") as f:
                 f.write(uploaded_image.getbuffer())
-        else:
-            image_path = None
     
     with col2:
         st.markdown("### Upload Audio")
@@ -148,8 +156,6 @@ def upload_media():
             audio_path = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3').name
             with open(audio_path, "wb") as f:
                 f.write(uploaded_audio.getbuffer())
-        else:
-            audio_path = None
     
     return image_path, audio_path
 
@@ -160,14 +166,19 @@ def process_video(image_path, audio_path):
         show_popup("Missing Files", "Please upload both image and audio files first.", "warning")
         return None
     
+    if not os.path.exists(image_path) or not os.path.exists(audio_path):
+        show_popup("File Access Error", "The uploaded files are no longer accessible. Please upload them again.", "error")
+        return None
+        
     # Check if FFmpeg is available
     if not is_ffmpeg_available():
         show_popup(
             "FFmpeg Not Available", 
-            "This cloud environment doesn't have FFmpeg installed. The video creation feature is only available when running locally.", 
+            "This cloud environment doesn't have FFmpeg installed. Using demo mode instead.", 
             "warning"
         )
-        return None
+        # Return a demo video path for testing
+        return "demo_video"
     
     try:
         with st.spinner("Creating your video with glitch effects..."):
@@ -476,6 +487,11 @@ def upload_to_youtube(video_file, title, description, tags):
                 }
             }
             
+            # For demo video
+            if video_file == "demo_video":
+                show_popup("Demo Mode", "This is a demo mode. In a real environment, your video would be uploaded now.", "info")
+                return True
+                
             # Upload video
             with st.spinner("Uploading video to YouTube..."):
                 # Check if file exists and is valid
@@ -530,14 +546,20 @@ def main():
     # Sidebar
     with st.sidebar:
         st.header("Navigation")
-        step = st.radio("", ["1. Upload Media", "2. Create Video", 
-                            "3. Video Information & SEO", "4. Upload to YouTube"], 
-                       index=st.session_state.current_step - 1,
-                       key="navigation")
         
-        # Update current step
-        for i, s in enumerate(["1. Upload Media", "2. Create Video", 
-                              "3. Video Information & SEO", "4. Upload to YouTube"]):
+        # Define steps
+        steps = ["1. Upload Media", "2. Create Video", 
+                "3. Video Information & SEO", "4. Upload to YouTube"]
+                
+        # Use radio button for navigation
+        current_step_index = st.session_state.current_step - 1
+        if current_step_index >= len(steps):
+            current_step_index = 0
+            
+        step = st.radio("", steps, index=current_step_index, key="navigation")
+        
+        # Update current step based on selection
+        for i, s in enumerate(steps):
             if step == s:
                 st.session_state.current_step = i + 1
         
@@ -565,54 +587,56 @@ def main():
     # Content based on selected step
     if st.session_state.current_step == 1:
         st.header("Step 1: Upload Media")
-        image_file, audio_file = upload_media()
+        image_path, audio_path = upload_media()
         
-        if image_file and audio_file:
-            st.session_state.image_file = image_file
-            st.session_state.audio_file = audio_file
+        if image_path and audio_path:
+            # Store paths in session state
+            st.session_state.image_file = image_path
+            st.session_state.audio_file = audio_path
             
-            # Auto advance to next step
+            st.success("Both files uploaded successfully!")
+            
+            # Show continue button without immediate rerun
             if st.button("Continue to Video Creation"):
                 st.session_state.current_step = 2
-                st.experimental_rerun()
     
     elif st.session_state.current_step == 2:
         st.header("Step 2: Create Video with Effects")
         
         # Check if we have media files
-        if not hasattr(st.session_state, 'image_file') or not hasattr(st.session_state, 'audio_file'):
+        if not st.session_state.get('image_file') or not st.session_state.get('audio_file'):
             st.warning("Please upload image and audio files first.")
             if st.button("Go Back to Media Upload"):
                 st.session_state.current_step = 1
-                st.experimental_rerun()
         else:
             # Process video
             if not is_ffmpeg_available():
-                st.error("FFmpeg is not available in this environment. Video creation feature requires FFmpeg to be installed.")
-                st.info("If you're running on Streamlit Cloud, this feature is not supported.")
+                st.warning("FFmpeg is not available in this environment. Using demo mode instead.")
                 
                 # Mock video for testing in cloud environment
                 if st.button("Create Sample Video (Demo Mode)"):
                     st.success("In demo mode, we'll skip actual video creation.")
                     sample_video = "https://sample-videos.com/video123/mp4/720/big_buck_bunny_720p_1mb.mp4"
                     st.video(sample_video)
-                    st.session_state.video_file = "sample_video.mp4"  # Just a placeholder
+                    st.session_state.video_file = "demo_video"  # Just a placeholder
                     st.session_state.processing_done = True
                     
                     if st.button("Continue to Video Information"):
                         st.session_state.current_step = 3
-                        st.experimental_rerun()
             else:
                 # Regular processing with FFmpeg
                 if st.button("Create Video with Glitch Effect") or st.session_state.get('processing_done', False):
-                    video_file = process_video(st.session_state.image_file, st.session_state.audio_file)
+                    video_file = process_video(
+                        st.session_state.image_file, 
+                        st.session_state.audio_file
+                    )
+                    
                     if video_file:
                         st.session_state.video_file = video_file
                         
                         # Auto advance to next step
                         if st.button("Continue to Video Information"):
                             st.session_state.current_step = 3
-                            st.experimental_rerun()
     
     elif st.session_state.current_step == 3:
         st.header("Step 3: Video Information & SEO")
@@ -622,7 +646,6 @@ def main():
             st.warning("Please create a video first.")
             if st.button("Go Back to Video Creation"):
                 st.session_state.current_step = 2
-                st.experimental_rerun()
         else:
             # Video Information
             col1, col2 = st.columns([2, 1])
@@ -633,10 +656,13 @@ def main():
                 video_tags = st.text_input("Tags (comma-separated)", key="tags_input")
             
             with col2:
-                if st.session_state.video_file == "sample_video.mp4":  # Demo mode
+                if st.session_state.video_file == "demo_video":  # Demo mode
                     st.video("https://sample-videos.com/video123/mp4/720/big_buck_bunny_720p_1mb.mp4")
                 else:
-                    st.video(st.session_state.video_file)
+                    try:
+                        st.video(st.session_state.video_file)
+                    except Exception as e:
+                        st.error(f"Could not display video. Error: {str(e)}")
             
             # Generate SEO content
             if st.button("Generate SEO Content with AI"):
@@ -663,7 +689,6 @@ def main():
                 # Auto advance to next step
                 if st.button("Continue to YouTube Upload"):
                     st.session_state.current_step = 4
-                    st.experimental_rerun()
     
     elif st.session_state.current_step == 4:
         st.header("Step 4: Upload to YouTube")
@@ -679,7 +704,6 @@ def main():
             st.warning("Please create a video first.")
             if st.button("Go Back to Video Creation"):
                 st.session_state.current_step = 2
-                st.experimental_rerun()
         else:
             # YouTube Authentication
             authenticate_youtube()
@@ -702,7 +726,7 @@ def main():
                 privacy = st.selectbox("Privacy Setting", ["private", "unlisted", "public"], index=0)
                 
                 # Handle demo mode
-                if st.session_state.video_file == "sample_video.mp4":  # Demo mode
+                if st.session_state.video_file == "demo_video":  # Demo mode
                     if st.button("Upload to YouTube"):
                         st.warning("This is demo mode. In a real environment, your video would be uploaded to YouTube now.")
                         show_popup("Demo Mode", "This is just a simulation. In a real environment with proper setup, your video would be uploaded to YouTube.", "info")
